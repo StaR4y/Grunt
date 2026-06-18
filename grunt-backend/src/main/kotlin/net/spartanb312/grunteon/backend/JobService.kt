@@ -1,5 +1,6 @@
 package net.spartanb312.grunteon.backend
 
+import net.spartanb312.grunteon.obfuscator.process.ObfConfig
 import org.springframework.stereotype.Service
 import org.springframework.web.multipart.MultipartFile
 import java.nio.file.Files
@@ -23,6 +24,20 @@ class JobService(
 
     fun submit(configFile: MultipartFile, inputFile: MultipartFile, libs: List<MultipartFile>): JobStatusResponse {
         require(!configFile.isEmpty) { "config file is required" }
+        return submitConfig(configFile.bytes, inputFile, libs, stripBom = true)
+    }
+
+    fun submit(config: ObfConfig, inputFile: MultipartFile, libs: List<MultipartFile>): JobStatusResponse {
+        val bytes = ObfuscatorConfigJson.write(config).toByteArray(Charsets.UTF_8)
+        return submitConfig(bytes, inputFile, libs, stripBom = false)
+    }
+
+    private fun submitConfig(
+        configBytes: ByteArray,
+        inputFile: MultipartFile,
+        libs: List<MultipartFile>,
+        stripBom: Boolean,
+    ): JobStatusResponse {
         require(!inputFile.isEmpty) { "input jar is required" }
 
         val jobId = UUID.randomUUID().toString()
@@ -34,18 +49,18 @@ class JobService(
         val inputPath = jobDir.resolve("input.jar")
         val libsDir = jobDir.resolve("libs").also { it.createDirectories() }
 
-        saveConfig(configFile, configPath)
+        saveConfig(configBytes, configPath, stripBom)
         inputFile.transferTo(inputPath)
 
-        val libPaths = libs
+        libs
             .filterNot { it.isEmpty }
-            .mapIndexed { index, file ->
+            .forEachIndexed { index, file ->
                 val safeName = file.originalFilename
                     ?.substringAfterLast('/')
                     ?.substringAfterLast('\\')
                     ?.takeIf { it.endsWith(".jar", ignoreCase = true) }
                     ?: "lib-$index.jar"
-                libsDir.resolve(safeName).also { file.transferTo(it) }
+                file.transferTo(libsDir.resolve(safeName))
             }
 
         val now = Instant.now()
@@ -75,9 +90,9 @@ class JobService(
         return resultZip
     }
 
-    private fun saveConfig(configFile: MultipartFile, configPath: Path) {
-        val bytes = configFile.bytes
+    private fun saveConfig(bytes: ByteArray, configPath: Path, stripBom: Boolean) {
         val offset = if (
+            stripBom &&
             bytes.size >= 3 &&
             bytes[0] == 0xEF.toByte() &&
             bytes[1] == 0xBB.toByte() &&

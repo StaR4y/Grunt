@@ -12,6 +12,18 @@ repositories {
 }
 
 val coroutineVersion: String = libs.versions.coroutine.get()
+val mainSourceSet = sourceSets.named("main").get()
+val devSourceSet = sourceSets.create("dev") {
+    compileClasspath += mainSourceSet.output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations.named(devSourceSet.implementationConfigurationName) {
+    extendsFrom(configurations.implementation.get())
+}
+configurations.named(devSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom(configurations.runtimeOnly.get())
+}
 
 dependencies {
     implementation(project(":grunt-main"))
@@ -45,5 +57,12 @@ tasks {
                 "Grunt-Plugin-Api" to "1"
             )
         }
+    }
+
+    register<JavaExec>("runDev") {
+        group = "application"
+        description = "Runs the grunt-yapyap development harness."
+        classpath = devSourceSet.runtimeClasspath
+        mainClass.set("net.spartanb312.grunt.yapyap.DevRunKt")
     }
 }

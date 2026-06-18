@@ -16,6 +16,7 @@ dependencies {
     implementation(platform("org.springframework.boot:spring-boot-dependencies:4.0.6"))
     implementation(enforcedPlatform("org.jetbrains.kotlin:kotlin-bom:2.3.21"))
     implementation(project(":grunt-main"))
+    implementation(libs.kotlinxSerializationJson)
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
 
@@ -27,6 +28,10 @@ configurations.runtimeClasspath {
 }
 
 tasks {
+    test {
+        useJUnitPlatform()
+    }
+
     bootJar {
         archiveFileName.set("grunt-backend.jar")
     }

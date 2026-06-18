@@ -1,5 +1,6 @@
 package net.spartanb312.grunteon.backend
 
+import net.spartanb312.grunteon.obfuscator.plugin.PluginManager
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
@@ -17,6 +18,7 @@ fun main(args: Array<String>) {
         WorkerJobRunner.run(Path(args[1]))
         return
     }
+    PluginManager.loadPlugins()
     runApplication<BackendApplication>(*args)
 }
 
