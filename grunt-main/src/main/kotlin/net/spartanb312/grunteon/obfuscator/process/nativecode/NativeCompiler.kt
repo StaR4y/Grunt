@@ -1,5 +1,6 @@
 package net.spartanb312.grunteon.obfuscator.process.nativecode
 
+import net.spartanb312.grunteon.obfuscator.util.Logger
 import java.io.File
 import java.io.IOException
 import java.lang.management.ManagementFactory
@@ -21,40 +22,38 @@ internal object NativeCompiler {
         bundle: NativeSourceBundle,
         config: NativePipelineConfig = NativePipelineConfig()
     ): NativeCompileResult {
-        bundle.libraryPath.parent.createDirectories()
+        bundle.resolvedLibraryTargets.forEach { it.libraryPath.parent.createDirectories() }
         writeSourceFiles(bundle)
 
         val compiler = findCompiler(config) ?: return NativeCompileResult(
             success = false,
             output = if (config.compilerExecutable.isNullOrBlank()) {
-                "No C++ compiler found on PATH. Tried clang++, g++, clang-cl, and cl."
+                when (config.compilerMode) {
+                    NativeCompilerMode.Zig -> "No Zig compiler found on PATH. Tried zig."
+                    NativeCompilerMode.GnuLike -> "No GNU-like C++ compiler found on PATH. Tried clang++ and g++."
+                    NativeCompilerMode.Msvc -> "No MSVC-style C++ compiler found on PATH. Tried clang-cl and cl."
+                    NativeCompilerMode.Auto -> "No C++ compiler found on PATH. Tried clang++, g++, clang-cl, and cl."
+                }
             } else {
                 "Configured C++ compiler not found: ${config.compilerExecutable}"
             }
         )
-        val javaHome = Path.of(System.getProperty("java.home"))
-        val includeRoot = resolveJniIncludeRoot(javaHome)
-        val includeOs = includeRoot.resolve(bundle.plan.platform.jniIncludeOs)
-        if (!includeRoot.exists() || !includeOs.exists()) {
-            return NativeCompileResult(
-                success = false,
-                output = "JNI headers not found under ${includeRoot.absolutePathString()} and ${includeOs.absolutePathString()}"
-            )
-        }
 
-        val result = if (compiler.kind == NativeCompilerKind.GnuLike && bundle.compilableSourcePaths().size > 1) {
-            compileGnuLikeSplit(bundle, compiler.command, includeRoot, includeOs, config)
-        } else {
-            runCommand(
-                buildCompileCommand(bundle, compiler, includeRoot, includeOs, config),
-                bundle.sourcePath.parent
+        val compileStartNanos = System.nanoTime()
+        val result = try {
+            if (compiler.kind == NativeCompilerKind.Zig) {
+                compileZigTargets(bundle, compiler.command, config)
+            } else {
+                compileSingleTarget(bundle, compiler, config)
+            }
+        } catch (exception: NativeJniHeaderException) {
+            NativeCompileResult(
+                success = false,
+                output = exception.message ?: "JNI headers could not be resolved"
             )
         }
-        return if (result.exitCode == 0 && Files.exists(bundle.libraryPath)) {
-            NativeCompileResult(true, bundle.libraryPath, result.output)
-        } else {
-            NativeCompileResult(false, null, "Native compiler exited with code ${result.exitCode}\n${result.output}")
-        }
+        val compileTimeMillis = (System.nanoTime() - compileStartNanos) / 1_000_000L
+        return result.copy(compileTimeMillis = compileTimeMillis)
     }
 
     internal fun buildCompileCommand(
@@ -67,7 +66,131 @@ internal object NativeCompiler {
         return when (compiler.kind) {
             NativeCompilerKind.GnuLike -> buildGnuLikeCommand(bundle, compiler.command, includeRoot, includeOs, config)
             NativeCompilerKind.Msvc -> buildMsvcCommand(bundle, compiler.command, includeRoot, includeOs, config)
+            NativeCompilerKind.Zig -> buildZigCommand(
+                bundle = bundle,
+                target = bundle.resolvedLibraryTargets.first(),
+                compiler = compiler.command,
+                includeRoot = includeRoot,
+                includeOs = includeOs,
+                config = config
+            )
         }
+    }
+
+    private fun compileSingleTarget(
+        bundle: NativeSourceBundle,
+        compiler: NativeCompilerExecutable,
+        config: NativePipelineConfig
+    ): NativeCompileResult {
+        val targets = bundle.resolvedLibraryTargets
+        val target = targets.firstOrNull {
+            it.platform.resourceDirectory == bundle.plan.platform.resourceDirectory
+        } ?: targets.first()
+        val includes = NativeJniHeaders.resolve(
+            platform = target.platform,
+            config = config,
+            workDir = Path.of(config.workDir),
+            allowBuiltInPlatformHeader = false
+        )
+        val sourceCount = bundle.compilableSourcePaths().size
+        val result = when {
+            compiler.kind == NativeCompilerKind.GnuLike && sourceCount > 1 -> {
+                compileGnuLikeSplit(bundle, compiler.command, includes.includeRoot, includes.platformInclude, config)
+            }
+            compiler.kind == NativeCompilerKind.Msvc && sourceCount > 1 -> {
+                runCommand(
+                    buildMsvcCommandWithSourceResponseFile(bundle, compiler.command, includes.includeRoot, includes.platformInclude, config),
+                    bundle.sourcePath.parent
+                )
+            }
+            else -> {
+                runCommand(
+                    buildCompileCommand(bundle, compiler, includes.includeRoot, includes.platformInclude, config),
+                    bundle.sourcePath.parent
+                )
+            }
+        }
+        return if (result.exitCode == 0 && Files.exists(target.libraryPath)) {
+            NativeCompileResult(
+                success = true,
+                libraryPath = target.libraryPath,
+                output = result.output,
+                libraries = listOf(NativeCompiledLibrary(target.platform, target.resourceName, target.libraryPath))
+            )
+        } else {
+            NativeCompileResult(
+                success = false,
+                output = "Native compiler exited with code ${result.exitCode}\n${result.output}"
+            )
+        }
+    }
+
+    private fun compileZigTargets(
+        bundle: NativeSourceBundle,
+        compiler: String,
+        config: NativePipelineConfig
+    ): NativeCompileResult {
+        val targets = bundle.resolvedLibraryTargets
+        if (targets.isEmpty()) {
+            return NativeCompileResult(false, output = "No Zig native targets configured")
+        }
+        val sourceCount = bundle.compilableSourcePaths().size
+        val output = StringBuilder()
+        val libraries = mutableListOf<NativeCompiledLibrary>()
+        targets.forEach { target ->
+            val includes = NativeJniHeaders.resolve(
+                platform = target.platform,
+                config = config,
+                workDir = Path.of(config.workDir),
+                allowBuiltInPlatformHeader = true
+            )
+            logZigTarget(target, compiler, includes)
+            val result = if (sourceCount > 1) {
+                compileZigSplit(bundle, target, compiler, includes.includeRoot, includes.platformInclude, config)
+            } else {
+                runCommand(
+                    buildZigCommand(bundle, target, compiler, includes.includeRoot, includes.platformInclude, config),
+                    bundle.sourcePath.parent
+                )
+            }
+            if (result.output.isNotBlank()) output.append(result.output).appendLine()
+            if (result.exitCode != 0 || !Files.exists(target.libraryPath)) {
+                return NativeCompileResult(
+                    success = false,
+                    output = "Zig target ${target.platform.resourceDirectory} failed with code ${result.exitCode}\n$output"
+                )
+            }
+            libraries += NativeCompiledLibrary(target.platform, target.resourceName, target.libraryPath)
+        }
+        return NativeCompileResult(
+            success = true,
+            libraryPath = libraries.firstOrNull()?.libraryPath,
+            output = output.toString(),
+            libraries = libraries
+        )
+    }
+
+    private fun logZigTarget(
+        target: NativeLibraryTarget,
+        compiler: String,
+        includes: NativeJniIncludeResolution
+    ) {
+        zigTargetLogLines(target, compiler, includes).forEach(Logger::info)
+    }
+
+    internal fun zigTargetLogLines(
+        target: NativeLibraryTarget,
+        compiler: String,
+        includes: NativeJniIncludeResolution
+    ): List<String> {
+        return listOf(
+            "  > Zig target ${target.platform.resourceDirectory}:",
+            "      triple=${target.platform.zigTarget.orEmpty()}",
+            "      resource=${target.resourceName}",
+            "      jniRoot=${includes.includeRoot.absolutePathString()} (${includes.includeRootSource})",
+            "      jniPlatformInclude=${includes.platformInclude.absolutePathString()} (${includes.platformIncludeSource})",
+            "      compiler=$compiler"
+        )
     }
 
     private fun buildGnuLikeCommand(
@@ -82,10 +205,12 @@ internal object NativeCompiler {
             add(compiler)
             add("-std=c++17")
             add(gnuOptimizationFlag(config))
-            add("-fPIC")
+            addAll(positionIndependentCodeArgs(bundle.plan.platform))
             add(sharedFlag)
             addAll(defaultGnuLikeCompilerArgs(bundle.plan.platform))
-            addAll(config.compilerArgs)
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.GnuLike))
+            addAll(gnuLikeStripDebugCompileArgs(config))
+            addAll(gnuLikeStripDebugLinkArgs(config, bundle.plan.platform))
             add("-I")
             add(includeRoot.absolutePathString())
             add("-I")
@@ -102,14 +227,16 @@ internal object NativeCompiler {
         compiler: String,
         includeRoot: Path,
         includeOs: Path,
-        config: NativePipelineConfig
+        config: NativePipelineConfig,
+        platform: NativePlatform = NativePlatform.current()
     ): List<String> {
         return buildList {
             add(compiler)
             add("-std=c++17")
             add(gnuOptimizationFlag(config))
-            add("-fPIC")
-            addAll(config.compilerArgs)
+            addAll(positionIndependentCodeArgs(platform))
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.GnuLike))
+            addAll(gnuLikeStripDebugCompileArgs(config))
             add("-I")
             add(includeRoot.absolutePathString())
             add("-I")
@@ -132,7 +259,8 @@ internal object NativeCompiler {
             add(compiler)
             add(sharedFlag)
             addAll(defaultGnuLikeCompilerArgs(bundle.plan.platform))
-            addAll(config.compilerArgs)
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.GnuLike))
+            addAll(gnuLikeStripDebugLinkArgs(config, bundle.plan.platform))
             add("-o")
             add(bundle.libraryPath.absolutePathString())
             addAll(objectPaths.map { it.absolutePathString() })
@@ -145,6 +273,99 @@ internal object NativeCompiler {
         } else {
             emptyList()
         }
+    }
+
+    private fun positionIndependentCodeArgs(platform: NativePlatform): List<String> {
+        return if (platform.os == "windows") emptyList() else listOf("-fPIC")
+    }
+
+    private fun commonUserCompilerArgs(
+        config: NativePipelineConfig,
+        compilerKind: NativeCompilerKind
+    ): List<String> {
+        return debugInfoFilteredArgs(config.compilerArgs, config, compilerKind)
+    }
+
+    private fun targetUserCompilerArgs(
+        config: NativePipelineConfig,
+        platform: NativePlatform,
+        compilerKind: NativeCompilerKind
+    ): List<String> {
+        return debugInfoFilteredArgs(
+            config.targetCompilerArgs[platform.resourceDirectory].orEmpty(),
+            config,
+            compilerKind
+        )
+    }
+
+    private fun debugInfoFilteredArgs(
+        args: List<String>,
+        config: NativePipelineConfig,
+        compilerKind: NativeCompilerKind
+    ): List<String> {
+        if (!config.stripDebugInfo) return args
+        return args.filterNot { isDebugInfoArg(it, compilerKind) }
+    }
+
+    private fun gnuLikeStripDebugCompileArgs(config: NativePipelineConfig): List<String> {
+        return if (config.stripDebugInfo) listOf("-g0") else emptyList()
+    }
+
+    private fun gnuLikeStripDebugLinkArgs(config: NativePipelineConfig, platform: NativePlatform): List<String> {
+        if (!config.stripDebugInfo) return emptyList()
+        return if (platform.os == "macos") {
+            listOf("-Wl,-S", "-Wl,-x")
+        } else {
+            listOf("-Wl,--strip-all")
+        }
+    }
+
+    private fun msvcStripDebugLinkArgs(config: NativePipelineConfig): List<String> {
+        return if (config.stripDebugInfo) {
+            listOf("/link", "/INCREMENTAL:NO", "/OPT:REF", "/OPT:ICF")
+        } else {
+            emptyList()
+        }
+    }
+
+    private fun isDebugInfoArg(arg: String, compilerKind: NativeCompilerKind): Boolean {
+        return when (compilerKind) {
+            NativeCompilerKind.GnuLike,
+            NativeCompilerKind.Zig -> isGnuLikeDebugInfoArg(arg)
+            NativeCompilerKind.Msvc -> isGnuLikeDebugInfoArg(arg) || isMsvcDebugInfoArg(arg)
+        }
+    }
+
+    private fun isGnuLikeDebugInfoArg(arg: String): Boolean {
+        return arg == "-g" ||
+            arg == "-g0" ||
+            arg.matches(Regex("-g[1-9].*")) ||
+            arg.startsWith("-ggdb") ||
+            arg.startsWith("-gdwarf") ||
+            arg.startsWith("-gcodeview") ||
+            arg.startsWith("-gline-") ||
+            arg.startsWith("-gmlt") ||
+            arg.startsWith("-gmodules") ||
+            arg.startsWith("-gembed-source") ||
+            arg.startsWith("-grecord-gcc-switches") ||
+            arg.startsWith("-gsplit-dwarf") ||
+            arg.startsWith("-gz") ||
+            arg.startsWith("-fdebug-") ||
+            arg.startsWith("-fno-eliminate-unused-debug")
+    }
+
+    private fun isMsvcDebugInfoArg(arg: String): Boolean {
+        val lowerArg = arg.lowercase()
+        val normalized = lowerArg
+            .removePrefix("/")
+            .removePrefix("-")
+        return normalized == "zi" ||
+            normalized == "zi-" ||
+            normalized == "zi+" ||
+            normalized == "z7" ||
+            normalized == "zd" ||
+            normalized.startsWith("debug") ||
+            normalized.startsWith("fd")
     }
 
     private fun buildMsvcCommand(
@@ -163,9 +384,104 @@ internal object NativeCompiler {
             add("/LD")
             add("/I${includeRoot.absolutePathString()}")
             add("/I${includeOs.absolutePathString()}")
-            addAll(config.compilerArgs)
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.Msvc))
             add("/Fe:${bundle.libraryPath.absolutePathString()}")
             addAll(bundle.compilableSourcePaths().map { it.absolutePathString() })
+            addAll(msvcStripDebugLinkArgs(config))
+        }
+    }
+
+    internal fun buildMsvcCommandWithSourceResponseFile(
+        bundle: NativeSourceBundle,
+        compiler: String,
+        includeRoot: Path,
+        includeOs: Path,
+        config: NativePipelineConfig
+    ): List<String> {
+        val responseFile = writeResponseFile(
+            path = bundle.sourcePath.parent.resolve("grunteon_native_sources.rsp"),
+            args = bundle.compilableSourcePaths().map(::responsePathToken)
+        )
+        return buildList {
+            add(compiler)
+            add("/nologo")
+            add("/std:c++17")
+            add("/EHsc")
+            add(msvcOptimizationFlag(config))
+            add("/LD")
+            add("/I${includeRoot.absolutePathString()}")
+            add("/I${includeOs.absolutePathString()}")
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.Msvc))
+            add("/Fe:${bundle.libraryPath.absolutePathString()}")
+            add(responseFileArg(responseFile))
+            addAll(msvcStripDebugLinkArgs(config))
+        }
+    }
+
+    internal fun buildZigCommand(
+        bundle: NativeSourceBundle,
+        target: NativeLibraryTarget,
+        compiler: String,
+        includeRoot: Path,
+        includeOs: Path,
+        config: NativePipelineConfig
+    ): List<String> {
+        val responseFile = writeResponseFile(
+            path = bundle.sourcePath.parent.resolve("grunteon_native_sources_${target.platform.resourceDirectory}.rsp"),
+            args = bundle.compilableSourcePaths().map(::responsePathToken)
+        )
+        val sharedFlag = if (target.platform.os == "macos") "-dynamiclib" else "-shared"
+        return buildList {
+            add(compiler)
+            add("c++")
+            add("-target")
+            add(target.platform.zigTarget ?: error("Missing Zig target for ${target.platform.resourceDirectory}"))
+            add("-std=c++17")
+            add(gnuOptimizationFlag(config))
+            addAll(positionIndependentCodeArgs(target.platform))
+            add(sharedFlag)
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.Zig))
+            addAll(targetUserCompilerArgs(config, target.platform, NativeCompilerKind.Zig))
+            addAll(gnuLikeStripDebugCompileArgs(config))
+            addAll(gnuLikeStripDebugLinkArgs(config, target.platform))
+            add("-I")
+            add(includeRoot.absolutePathString())
+            add("-I")
+            add(includeOs.absolutePathString())
+            add("-o")
+            add(target.libraryPath.absolutePathString())
+            add(responseFileArg(responseFile))
+        }
+    }
+
+    internal fun buildZigObjectCommand(
+        sourcePath: Path,
+        objectPath: Path,
+        target: NativeLibraryTarget,
+        compiler: String,
+        includeRoot: Path,
+        includeOs: Path,
+        config: NativePipelineConfig
+    ): List<String> {
+        return buildList {
+            add(compiler)
+            add("c++")
+            add("-target")
+            add(target.platform.zigTarget ?: error("Missing Zig target for ${target.platform.resourceDirectory}"))
+            add("-std=c++17")
+            add(gnuOptimizationFlag(config))
+            addAll(positionIndependentCodeArgs(target.platform))
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.Zig))
+            addAll(targetUserCompilerArgs(config, target.platform, NativeCompilerKind.Zig))
+            addAll(gnuLikeStripDebugCompileArgs(config))
+            add("-I")
+            add(includeRoot.absolutePathString())
+            add("-I")
+            add(includeOs.absolutePathString())
+            add("-c")
+            add(sourcePath.absolutePathString())
+            add("-o")
+            add(objectPath.absolutePathString())
         }
     }
 
@@ -188,7 +504,15 @@ internal object NativeCompiler {
         try {
             val tasks = sourcePaths.zip(objectPaths).map { (source, objectPath) ->
                 Callable {
-                    val command = buildGnuLikeObjectCommand(source, objectPath, compiler, includeRoot, includeOs, config)
+                    val command = buildGnuLikeObjectCommand(
+                        source,
+                        objectPath,
+                        compiler,
+                        includeRoot,
+                        includeOs,
+                        config,
+                        bundle.plan.platform
+                    )
                     runCommand(command, bundle.sourcePath.parent)
                 }
             }
@@ -206,20 +530,116 @@ internal object NativeCompiler {
             executor.shutdown()
         }
 
-        val linkCommand = buildGnuLikeLinkCommand(bundle, compiler, objectPaths, config)
+        val linkCommand = buildGnuLikeLinkCommandWithObjectResponseFile(bundle, compiler, objectPaths, config)
         val linkResult = runCommand(linkCommand, bundle.sourcePath.parent)
         if (linkResult.output.isNotBlank()) output.append(linkResult.output)
         return CommandResult(linkResult.exitCode, output.toString(), linkCommand)
+    }
+
+    private fun compileZigSplit(
+        bundle: NativeSourceBundle,
+        target: NativeLibraryTarget,
+        compiler: String,
+        includeRoot: Path,
+        includeOs: Path,
+        config: NativePipelineConfig
+    ): CommandResult {
+        val sourcePaths = bundle.compilableSourcePaths()
+        val objectDir = bundle.sourcePath.parent.resolve("obj").resolve(target.platform.resourceDirectory)
+        objectDir.createDirectories()
+        val objectPaths = sourcePaths.mapIndexed { index, source ->
+            objectDir.resolve("${source.name.substringBeforeLast('.')}_${index.toString().padStart(4, '0')}.o")
+        }
+        val jobs = effectiveParallelCompileJobs(config, sourcePaths.size)
+        val executor = Executors.newFixedThreadPool(jobs)
+        val output = StringBuilder()
+        try {
+            val tasks = sourcePaths.zip(objectPaths).map { (source, objectPath) ->
+                Callable {
+                    val command = buildZigObjectCommand(source, objectPath, target, compiler, includeRoot, includeOs, config)
+                    runCommand(command, bundle.sourcePath.parent)
+                }
+            }
+            val results = executor.invokeAll(tasks).map { it.get() }
+            results.forEach { result ->
+                if (result.output.isNotBlank()) output.append(result.output).appendLine()
+                if (result.exitCode != 0) {
+                    output.append("Failed command: ")
+                        .append(result.command.joinToString(" "))
+                        .appendLine()
+                    return CommandResult(result.exitCode, output.toString(), result.command)
+                }
+            }
+        } finally {
+            executor.shutdown()
+        }
+
+        val linkCommand = buildZigLinkCommandWithObjectResponseFile(bundle, target, compiler, objectPaths, config)
+        val linkResult = runCommand(linkCommand, bundle.sourcePath.parent)
+        if (linkResult.output.isNotBlank()) output.append(linkResult.output)
+        return CommandResult(linkResult.exitCode, output.toString(), linkCommand)
+    }
+
+    internal fun buildGnuLikeLinkCommandWithObjectResponseFile(
+        bundle: NativeSourceBundle,
+        compiler: String,
+        objectPaths: List<Path>,
+        config: NativePipelineConfig
+    ): List<String> {
+        val responseFile = writeResponseFile(
+            path = bundle.sourcePath.parent.resolve("grunteon_native_objects.rsp"),
+            args = objectPaths.map(::responsePathToken)
+        )
+        val sharedFlag = if (bundle.plan.platform.os == "macos") "-dynamiclib" else "-shared"
+        return buildList {
+            add(compiler)
+            add(sharedFlag)
+            addAll(defaultGnuLikeCompilerArgs(bundle.plan.platform))
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.GnuLike))
+            addAll(gnuLikeStripDebugLinkArgs(config, bundle.plan.platform))
+            add("-o")
+            add(bundle.libraryPath.absolutePathString())
+            add(responseFileArg(responseFile))
+        }
+    }
+
+    internal fun buildZigLinkCommandWithObjectResponseFile(
+        bundle: NativeSourceBundle,
+        target: NativeLibraryTarget,
+        compiler: String,
+        objectPaths: List<Path>,
+        config: NativePipelineConfig
+    ): List<String> {
+        val responseFile = writeResponseFile(
+            path = bundle.sourcePath.parent.resolve("grunteon_native_objects_${target.platform.resourceDirectory}.rsp"),
+            args = objectPaths.map(::responsePathToken)
+        )
+        val sharedFlag = if (target.platform.os == "macos") "-dynamiclib" else "-shared"
+        return buildList {
+            add(compiler)
+            add("c++")
+            add("-target")
+            add(target.platform.zigTarget ?: error("Missing Zig target for ${target.platform.resourceDirectory}"))
+            add(sharedFlag)
+            addAll(commonUserCompilerArgs(config, NativeCompilerKind.Zig))
+            addAll(targetUserCompilerArgs(config, target.platform, NativeCompilerKind.Zig))
+            addAll(gnuLikeStripDebugLinkArgs(config, target.platform))
+            add("-o")
+            add(target.libraryPath.absolutePathString())
+            add(responseFileArg(responseFile))
+        }
     }
 
     private fun writeSourceFiles(bundle: NativeSourceBundle) {
         val sourceRoot = bundle.sourcePath.parent
         val expectedSources = bundle.sourceFiles.map { it.path.toAbsolutePath().normalize() }.toSet()
         if (sourceRoot.exists()) {
-            Files.newDirectoryStream(sourceRoot, "grunteon_native*.cpp").use { entries ->
-                entries.forEach { existing ->
-                    if (existing.toAbsolutePath().normalize() !in expectedSources) {
-                        Files.deleteIfExists(existing)
+            listOf("grunteon_native*.cpp", "grunteon_native*.hpp").forEach { glob ->
+                Files.newDirectoryStream(sourceRoot, glob).use { entries ->
+                    entries.forEach { existing ->
+                        if (existing.toAbsolutePath().normalize() !in expectedSources) {
+                            Files.deleteIfExists(existing)
+                        }
                     }
                 }
             }
@@ -248,13 +668,40 @@ internal object NativeCompiler {
         } catch (exception: IOException) {
             return CommandResult(
                 exitCode = -1,
-                output = "Failed to start native compiler ${command.firstOrNull().orEmpty()}: ${exception.message}",
+                output = "Failed to start native compiler ${command.firstOrNull().orEmpty()}: " +
+                    "${exception.message} (commandLineLength=${estimatedWindowsCommandLineLength(command)})",
                 command = command
             )
         }
         val output = process.inputStream.bufferedReader().use { it.readText() }
         val exitCode = process.waitFor()
         return CommandResult(exitCode, output, command)
+    }
+
+    private fun writeResponseFile(path: Path, args: List<String>): Path {
+        path.parent.createDirectories()
+        path.writeText(args.joinToString(System.lineSeparator(), postfix = System.lineSeparator()))
+        return path
+    }
+
+    private fun responseFileArg(path: Path): String {
+        return "@${path.absolutePathString()}"
+    }
+
+    private fun responsePathToken(path: Path): String {
+        val value = path.absolutePathString().let {
+            if (File.separatorChar == '\\') it.replace('\\', '/') else it
+        }
+        return responseToken(value)
+    }
+
+    private fun responseToken(value: String): String {
+        if (value.isNotEmpty() && value.none { it.isWhitespace() || it == '"' }) return value
+        return "\"" + value.replace("\"", "\\\"") + "\""
+    }
+
+    private fun estimatedWindowsCommandLineLength(command: List<String>): Int {
+        return command.sumOf { it.length + 3 }
     }
 
     internal fun effectiveParallelCompileJobs(config: NativePipelineConfig, sourceCount: Int): Int {
@@ -313,39 +760,47 @@ internal object NativeCompiler {
         }
     }
 
-    private fun resolveJniIncludeRoot(javaHome: Path): Path {
-        val direct = javaHome.resolve("include")
-        if (direct.exists()) return direct
-        return javaHome.parent?.resolve("include") ?: direct
-    }
-
     private fun findCompiler(config: NativePipelineConfig): NativeCompilerExecutable? {
         val configured = config.compilerExecutable?.takeIf { it.isNotBlank() }
         if (configured != null) {
-            return resolveConfiguredCompiler(configured)
+            return resolveConfiguredCompiler(configured, config.compilerMode)
         }
-        return sequenceOf("clang++", "g++", "clang-cl", "cl")
+        val candidates = when (config.compilerMode) {
+            NativeCompilerMode.Zig -> sequenceOf("zig")
+            NativeCompilerMode.GnuLike -> sequenceOf("clang++", "g++")
+            NativeCompilerMode.Msvc -> sequenceOf("clang-cl", "cl")
+            NativeCompilerMode.Auto -> sequenceOf("clang++", "g++", "clang-cl", "cl")
+        }
+        return candidates
             .mapNotNull { name ->
                 findExecutable(name)?.let {
-                    NativeCompilerExecutable(it.absolutePath, compilerKind(name))
+                    NativeCompilerExecutable(it.absolutePath, compilerKind(name, config.compilerMode))
                 }
             }
             .firstOrNull()
     }
 
-    private fun resolveConfiguredCompiler(value: String): NativeCompilerExecutable? {
+    private fun resolveConfiguredCompiler(value: String, mode: NativeCompilerMode): NativeCompilerExecutable? {
         val configuredFile = File(value)
         val resolved = when {
             configuredFile.isFile -> configuredFile.absolutePath
             value.contains('/') || value.contains('\\') -> return null
             else -> findExecutable(value)?.absolutePath ?: return null
         }
-        return NativeCompilerExecutable(resolved, compilerKind(value))
+        return NativeCompilerExecutable(resolved, compilerKind(value, mode))
     }
 
-    internal fun compilerKind(command: String): NativeCompilerKind {
+    internal fun compilerKind(command: String, mode: NativeCompilerMode = NativeCompilerMode.Auto): NativeCompilerKind {
+        when (mode) {
+            NativeCompilerMode.Zig -> return NativeCompilerKind.Zig
+            NativeCompilerMode.GnuLike -> return NativeCompilerKind.GnuLike
+            NativeCompilerMode.Msvc -> return NativeCompilerKind.Msvc
+            NativeCompilerMode.Auto -> Unit
+        }
         val name = File(command).name.lowercase()
-        return if (name == "cl" ||
+        return if (name == "zig" || name == "zig.exe") {
+            NativeCompilerKind.Zig
+        } else if (name == "cl" ||
             name == "cl.exe" ||
             name == "clang-cl" ||
             name == "clang-cl.exe"
@@ -381,7 +836,8 @@ internal object NativeCompiler {
 
     internal enum class NativeCompilerKind {
         GnuLike,
-        Msvc
+        Msvc,
+        Zig
     }
 
     internal data class CommandResult(

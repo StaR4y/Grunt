@@ -25,6 +25,30 @@ enum class NativeOptimizationLevel {
 }
 
 @Serializable
+enum class NativeCompilerMode {
+    Auto,
+    GnuLike,
+    Msvc,
+    Zig
+}
+
+@Serializable
+enum class NativeTargetPreset {
+    WindowsX86_64,
+    WindowsAarch64,
+    LinuxX86_64,
+    LinuxAarch64,
+    MacosX86_64,
+    MacosAarch64
+}
+
+@Serializable
+enum class NativeJniHeaderPolicy {
+    AutoFallback,
+    RequireConfiguredTargetHeaders
+}
+
+@Serializable
 data class NativePipelineConfig(
     @SettingDesc("Enable native code generation after the transformer pipeline and before jar dumping")
     @SettingName("Enabled")
@@ -62,7 +86,7 @@ data class NativePipelineConfig(
     @SettingDesc("Maximum native methods emitted into one generated C++ source file when source splitting is enabled")
     @IntRangeVal(min = 1, max = 4096)
     @SettingName("Max methods per source file")
-    val maxMethodsPerSourceFile: Int = 64,
+    val maxMethodsPerSourceFile: Int = 16,
     @SettingDesc("Maximum parallel C++ compile jobs for split native sources. 0 uses a conservative memory-aware automatic value.")
     @IntRangeVal(min = 0, max = 128)
     @SettingName("Parallel compile jobs")
@@ -70,10 +94,34 @@ data class NativePipelineConfig(
     @SettingDesc("C++ compiler optimization level for generated native sources")
     @SettingName("Optimization level")
     val optimizationLevel: NativeOptimizationLevel = NativeOptimizationLevel.O1,
+    @SettingDesc("Ask the native compiler/linker to avoid and strip debug information from generated libraries")
+    @SettingName("Strip debug info")
+    val stripDebugInfo: Boolean = false,
+    @SettingDesc("Lower safe primitive JDK helper calls directly to C++ in full-JVM native methods")
+    @SettingName("Enable primitive intrinsics")
+    val enablePrimitiveIntrinsics: Boolean = true,
+    @SettingDesc("Native C++ compiler command style")
+    @SettingName("Compiler mode")
+    val compilerMode: NativeCompilerMode = NativeCompilerMode.Auto,
+    @SettingDesc("Target platforms for Zig cross compilation. Empty means all built-in Zig targets.")
+    @SettingName("Target platforms")
+    val targetPlatforms: List<NativeTargetPreset> = emptyList(),
+    @SettingDesc("Optional JDK include root containing jni.h. Empty uses auto-detection.")
+    @SettingName("JNI include root")
+    val jniIncludeRoot: String? = null,
+    @SettingDesc("JNI platform header fallback policy. Strict mode requires configured headers for cross targets.")
+    @SettingName("JNI header policy")
+    val jniHeaderPolicy: NativeJniHeaderPolicy = NativeJniHeaderPolicy.AutoFallback,
+    @SettingDesc("Optional per-target directories containing jni_md.h, keyed by resource id such as linux-x86_64")
+    @SettingName("Target JNI include dirs")
+    val targetJniIncludeDirs: Map<String, String> = emptyMap(),
     @SettingDesc("Optional C++ compiler executable path or command name. Empty uses auto-detection.")
     @SettingName("Compiler executable")
     val compilerExecutable: String? = null,
     @SettingDesc("Additional arguments passed to the native C++ compiler")
     @SettingName("Compiler args")
-    val compilerArgs: List<String> = emptyList()
+    val compilerArgs: List<String> = emptyList(),
+    @SettingDesc("Additional compiler arguments per target resource id")
+    @SettingName("Target compiler args")
+    val targetCompilerArgs: Map<String, List<String>> = emptyMap()
 )

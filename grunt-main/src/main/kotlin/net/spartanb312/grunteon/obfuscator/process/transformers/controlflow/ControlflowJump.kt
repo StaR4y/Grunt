@@ -29,7 +29,7 @@ import org.objectweb.asm.tree.analysis.BasicInterpreter
 @Transformer.Stability(StableLevel.Moderate)
 @Transformer.Description(
     "process.controlflow.controlflow_jump.desc",
-    "Insert verifier-safe junk branches through Flow IR"
+    "Insert/edit verifier-safe branches through Flow IR"
 )
 class ControlflowJump : Transformer<ControlflowJump.Config>(
     "ControlflowJump",
@@ -181,12 +181,10 @@ class ControlflowJump : Transformer<ControlflowJump.Config>(
         )
     ) : TransformerConfig()
 
-    private lateinit var methodExPredicate: NamePredicates
-
     context(instance: Grunteon, _: PipelineBuilder)
     override fun buildStageImpl(config: Config) {
-        pre {
-            methodExPredicate = buildMethodNamePredicates(config.exclusion)
+        val methodExPredicate = globalScopeValue {
+            buildMethodNamePredicates(config.exclusion)
         }
 
         val hierarchyKey = globalScopeValue {
@@ -248,6 +246,7 @@ class ControlflowJump : Transformer<ControlflowJump.Config>(
             val hierarchy = hierarchyKey.global
             val flowTypeHierarchy = ClassHierarchyFlowTypeHierarchy(hierarchy)
             val pool = junkCallPoolKey.global
+            val methodExPredicate = methodExPredicate.global
             val transformedMethods = classNode.methods.map { methodNode ->
                 if (methodNode.isAbstract || methodNode.isNative || methodNode.name == "<init>") {
                     methodNode

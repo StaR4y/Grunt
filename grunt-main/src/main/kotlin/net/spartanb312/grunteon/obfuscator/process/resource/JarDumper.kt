@@ -13,7 +13,6 @@ import net.spartanb312.grunteon.obfuscator.util.cryptography.getSeed
 import net.spartanb312.grunteon.obfuscator.util.file.SingleEntryZipOutputStream
 import net.spartanb312.grunteon.obfuscator.util.file.corruptCRC32
 import net.spartanb312.grunteon.obfuscator.util.file.corruptJarHeader
-import net.spartanb312.grunteon.obfuscator.util.filters.test
 import org.objectweb.asm.Opcodes
 import java.io.ByteArrayOutputStream
 import java.lang.invoke.MethodType
@@ -188,6 +187,9 @@ object JarDumper {
                     // TODO: dump mappings
                 }
             }
+        }
+        output.sizeBytes()?.let { size ->
+            Logger.info("Dumped jar size: $size bytes")
         }
     }
 

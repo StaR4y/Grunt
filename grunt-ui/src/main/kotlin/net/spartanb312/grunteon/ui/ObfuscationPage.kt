@@ -19,10 +19,17 @@ import io.github.composefluent.surface.Card
 fun ObfuscationPage(
     logs: List<String>,
     running: Boolean,
+    enabledTransformerCount: Int,
+    nativePipelineEnabled: Boolean,
     onObfuscate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scrollState = rememberScrollState()
+    val enabledTransformersText = if (nativePipelineEnabled) {
+        uiText(UiText.Obfuscation.EnabledTransformersWithNative, "count" to enabledTransformerCount)
+    } else {
+        uiText(UiText.Obfuscation.EnabledTransformers, "count" to enabledTransformerCount)
+    }
 
     LaunchedEffect(logs.size) {
         scrollState.animateScrollTo(scrollState.maxValue)
@@ -49,7 +56,7 @@ fun ObfuscationPage(
                     ) {
                         if (logs.isEmpty()) {
                             Text(
-                                "No obfuscation run yet.",
+                                uiText(UiText.Obfuscation.NoRunYet),
                                 color = FluentTheme.colors.text.text.secondary, fontFamily = FontFamily.Monospace
                             )
                         } else {
@@ -70,15 +77,15 @@ fun ObfuscationPage(
                     .height(120.dp)
             ) {
                 Box(Modifier.fillMaxSize().padding(12.dp)) {
-                    Text("Reserved", color = FluentTheme.colors.text.text.secondary)
+                    Text(enabledTransformersText, color = FluentTheme.colors.text.text.secondary)
                     Row(
                         modifier = Modifier.align(Alignment.BottomEnd),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (running) Text("Running...", color = FluentTheme.colors.text.text.secondary)
+                        if (running) Text(uiText(UiText.Obfuscation.Running), color = FluentTheme.colors.text.text.secondary)
                         UiButton(onClick = onObfuscate, enabled = !running) {
-                            Text("Obfuscate")
+                            Text(uiText(UiText.Obfuscation.Obfuscate))
                         }
                     }
                 }

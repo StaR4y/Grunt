@@ -42,7 +42,7 @@ class MethodInlinerTest {
             )
         )
         context(instance.workRes, instance) {
-            instance.execute()
+            instance.run()
         }
 
         val classNode = instance.workRes.inputClassMap[CLASS_NAME]

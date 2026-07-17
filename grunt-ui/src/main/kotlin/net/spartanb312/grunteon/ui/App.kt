@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
@@ -47,7 +48,7 @@ fun main(args: Array<String>) {
         val appModel = remember { AppModel(this, coroutineScope) }
         Window(
             onCloseRequest = appModel::onExit,
-            title = "Grunteon",
+            title = uiText(UiText.App.WindowTitle),
             state = windowState,
             icon = painterResource("logo.svg")
         ) {
@@ -106,24 +107,34 @@ fun FrameWindowScope.App(
         val runConfig = appModel.obfConfig
         obfuscationLogs.clear()
         obfuscationRunning = true
-        appModel.uiState.globalStatus = "Obfuscation started"
+        appModel.uiState.globalStatus = uiText(UiText.Status.ObfuscationStarted)
         Thread(
             {
                 val previousLogger = Logger
                 Logger = UiLogger("Grunteon", appModel.appConfig.uiLogLevel, ::appendObfuscationLog)
                 try {
-                    Logger.info("Starting obfuscation with ${runConfig.transformers.count { it.enabled }} enabled transformer nodes")
+                    Logger.info(
+                        uiText(
+                            UiText.Obfuscation.StartingLog,
+                            "count" to runConfig.transformers.count { it.enabled }
+                        )
+                    )
                     val instance = Grunteon.create(runConfig)
-                    instance.execute()
-                    Logger.info("Obfuscation finished")
+                    instance.run()
+                    Logger.info(uiText(UiText.Obfuscation.FinishedLog))
                     SwingUtilities.invokeLater {
-                        appModel.uiState.globalStatus = "Obfuscation finished"
+                        appModel.uiState.globalStatus = uiText(UiText.Status.ObfuscationFinished)
                     }
                 } catch (t: Throwable) {
-                    Logger.error("Obfuscation failed: ${t.message ?: t::class.qualifiedName}")
+                    Logger.error(
+                        uiText(
+                            UiText.Obfuscation.FailedLog,
+                            "message" to (t.message ?: t::class.qualifiedName)
+                        )
+                    )
                     t.stackTraceToString().lines().forEach { Logger.error(it) }
                     SwingUtilities.invokeLater {
-                        appModel.uiState.globalStatus = "Obfuscation failed"
+                        appModel.uiState.globalStatus = uiText(UiText.Status.ObfuscationFailed)
                     }
                 } finally {
                     Logger = previousLogger
@@ -221,9 +232,12 @@ fun FrameWindowScope.App(
                             when (appModel.uiState.currentPage) {
                                 AppPage.General -> GeneralPage(appModel)
                                 AppPage.Editor -> PipelineEditorPage(pipelineEditorState)
+                                AppPage.Native -> NativePage(appModel)
                                 AppPage.Obfuscation -> ObfuscationPage(
                                     logs = obfuscationLogs,
                                     running = obfuscationRunning,
+                                    enabledTransformerCount = appModel.obfConfig.transformers.count { it.enabled },
+                                    nativePipelineEnabled = appModel.obfConfig.nativePipeline.enabled,
                                     onObfuscate = ::runObfuscation,
                                     modifier = Modifier.fillMaxSize()
                                 )
@@ -307,22 +321,21 @@ private fun BottomStatusBar(appModel: AppModel) {
     Card(Modifier.fillMaxWidth(), shape = FluentTheme.shapes.intersectionEdge) {
         Row(
             modifier = Modifier
+                .fillMaxWidth()
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 appModel.uiState.globalStatus,
                 modifier = Modifier.weight(1f),
-            )
-            Text(
-                appModel.uiState.pageStatus,
-                modifier = Modifier.weight(1f),
-                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 "$VERSION [$SUBTITLE]",
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.padding(start = 16.dp),
                 textAlign = TextAlign.End,
+                maxLines = 1,
             )
         }
     }

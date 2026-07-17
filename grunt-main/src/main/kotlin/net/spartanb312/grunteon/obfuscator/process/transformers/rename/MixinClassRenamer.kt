@@ -7,6 +7,7 @@ import com.google.gson.JsonObject
 import kotlinx.serialization.Serializable
 import net.spartanb312.grunteon.obfuscator.Grunteon
 import net.spartanb312.grunteon.obfuscator.pipeline.after
+import net.spartanb312.grunteon.obfuscator.pipeline.before
 import net.spartanb312.grunteon.obfuscator.process.*
 import net.spartanb312.grunteon.obfuscator.process.resource.NameGenerator
 import net.spartanb312.grunteon.obfuscator.process.transformers.controlflow.ControlflowJump
@@ -20,8 +21,8 @@ import net.spartanb312.grunteon.obfuscator.util.filters.filter
 import net.spartanb312.grunteon.obfuscator.util.splash
 import java.nio.charset.StandardCharsets
 
-@HiddenTransformer
-@Transformer.Stability(StableLevel.Developing)
+@Transformer.CreditMultiplier(2.0)
+@Transformer.Stability(StableLevel.Stable)
 @Transformer.Description(
     "process.rename.mixin_class_renamer.desc",
     "Renaming mixin classes"
@@ -39,7 +40,10 @@ class MixinClassRenamer : Transformer<MixinClassRenamer.Config>(
         after(Category.Miscellaneous, "Mixin renamer should run after miscellaneous category")
         after(Category.Optimization, "Mixin renamer should run after optimization category")
         after(Category.Redirect, "Mixin renamer should run after redirect category")
-        after(ControlflowJump::class.java, "Mixin renamer should run after ControlflowJump")
+        after(ControlflowJump::class.java, "MixinClassRenamer should run after ControlflowJump")
+        after(ClassRenamer::class.java, "MixinClassRenamer should run after ClassRenamer")
+        before(FieldRenamer::class.java, "MixinClassRenamer should run before FieldRenamer")
+        before(MethodRenamer::class.java, "MixinClassRenamer should run before MethodRenamer")
     }
 
     @Serializable
@@ -97,6 +101,7 @@ class MixinClassRenamer : Transformer<MixinClassRenamer.Config>(
                 instance.nameMapping.putClassMapping(classNode.name, newName)
             }
 
+            credit.add(mappings.size * 500L)
             Logger.info("    Generated mapping for ${mappings.size} mixin classes")
             if (mappings.isNotEmpty()) {
                 remapMixinFiles(config, mappings)

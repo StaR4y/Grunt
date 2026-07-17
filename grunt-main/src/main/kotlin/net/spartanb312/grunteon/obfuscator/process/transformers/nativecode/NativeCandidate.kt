@@ -4,28 +4,14 @@ import kotlinx.serialization.Serializable
 import net.spartanb312.grunteon.obfuscator.Grunteon
 import net.spartanb312.grunteon.obfuscator.pipeline.after
 import net.spartanb312.grunteon.obfuscator.pipeline.before
-import net.spartanb312.grunteon.obfuscator.process.Category
-import net.spartanb312.grunteon.obfuscator.process.ClassFilterConfig
-import net.spartanb312.grunteon.obfuscator.process.IntRangeVal
-import net.spartanb312.grunteon.obfuscator.process.PipelineBuilder
-import net.spartanb312.grunteon.obfuscator.process.SettingDesc
-import net.spartanb312.grunteon.obfuscator.process.SettingName
-import net.spartanb312.grunteon.obfuscator.process.StableLevel
-import net.spartanb312.grunteon.obfuscator.process.Transformer
-import net.spartanb312.grunteon.obfuscator.process.TransformerConfig
-import net.spartanb312.grunteon.obfuscator.process.seq
+import net.spartanb312.grunteon.obfuscator.process.*
 import net.spartanb312.grunteon.obfuscator.util.GENERATED_METHOD
 import net.spartanb312.grunteon.obfuscator.util.Logger
 import net.spartanb312.grunteon.obfuscator.util.NATIVE_EXCLUDED
 import net.spartanb312.grunteon.obfuscator.util.NATIVE_INCLUDED
-import net.spartanb312.grunteon.obfuscator.util.extensions.appendAnnotation
-import net.spartanb312.grunteon.obfuscator.util.extensions.hasAnnotation
-import net.spartanb312.grunteon.obfuscator.util.extensions.isAbstract
-import net.spartanb312.grunteon.obfuscator.util.extensions.isInterface
-import net.spartanb312.grunteon.obfuscator.util.extensions.isNative
+import net.spartanb312.grunteon.obfuscator.util.extensions.*
 import net.spartanb312.grunteon.obfuscator.util.filters.buildMethodNamePredicates
 import net.spartanb312.grunteon.obfuscator.util.filters.matchedAnyBy
-import net.spartanb312.grunteon.obfuscator.util.filters.withMapping
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.commons.Remapper
 import org.objectweb.asm.tree.ClassNode
@@ -61,6 +47,8 @@ class NativeCandidate : Transformer<NativeCandidate.Config>(
     ) : TransformerConfig()
 
     @Serializable
+    @SettingDesc("Set detection rule for scanner")
+    @SettingName("Detection rule")
     data class Rule(
         @SettingDesc("Human readable rule name shown in the summary")
         @SettingName("Name")
@@ -92,12 +80,6 @@ class NativeCandidate : Transformer<NativeCandidate.Config>(
         @SettingDesc("Allow class initializers")
         @SettingName("Include class initializers")
         val includeClassInitializers: Boolean = false,
-        @SettingDesc("Allow abstract methods")
-        @SettingName("Include abstract")
-        val includeAbstract: Boolean = false,
-        @SettingDesc("Allow methods already declared native")
-        @SettingName("Include native")
-        val includeNative: Boolean = false,
         @SettingDesc("Allow methods declared in interface classes")
         @SettingName("Include interface methods")
         val includeInterfaceMethods: Boolean = false
@@ -133,7 +115,7 @@ class NativeCandidate : Transformer<NativeCandidate.Config>(
                 .and(config.classFilter.toClassPredicate())
                 .withMapping(instance.nameMapping.revMappings)
             val result = markCandidates(
-                instance.workRes.inputClassCollection.filter { classPredicate.testImpl(it) },
+                instance.workRes.inputClassCollection.filter { classPredicate.test(it) },
                 config,
                 instance.nameMapping.revMappings
             )
@@ -211,9 +193,8 @@ class NativeCandidate : Transformer<NativeCandidate.Config>(
         private val excludedAnnotations = rule.excludedAnnotationList.map { normalizeAnnotation(it) }.filter { it.isNotBlank() }
 
         fun matches(classNode: ClassNode, method: MethodNode, classNameMapping: Map<String, String>): Boolean {
+            if (method.isNative || method.isAbstract) return false
             if (!rule.includeInterfaceMethods && classNode.isInterface) return false
-            if (!rule.includeAbstract && method.isAbstract) return false
-            if (!rule.includeNative && method.isNative) return false
             if (!rule.includeConstructors && method.name == "<init>") return false
             if (!rule.includeClassInitializers && method.name == "<clinit>") return false
             if (!rule.includeGenerated && method.hasAnnotation(GENERATED_METHOD)) return false

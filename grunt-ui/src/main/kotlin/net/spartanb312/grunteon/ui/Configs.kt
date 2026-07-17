@@ -25,8 +25,11 @@ import io.github.composefluent.icons.regular.Dismiss
 import io.github.composefluent.scheme.collectVisualState
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Transient
+import net.spartanb312.grunteon.obfuscator.lang.I18n
+import net.spartanb312.grunteon.obfuscator.lang.I18nDescriptorRegistry
 import net.spartanb312.grunteon.obfuscator.process.*
 import net.spartanb312.grunteon.obfuscator.util.Decimal
+import net.spartanb312.grunteon.obfuscator.util.interfaces.DisplayEnum
 import java.math.RoundingMode
 import kotlin.math.max
 import kotlin.reflect.KClass
@@ -35,6 +38,7 @@ import kotlin.reflect.KProperty
 import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.full.memberFunctions
 import kotlin.reflect.full.memberProperties
+import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.isAccessible
 import kotlin.reflect.jvm.javaField
 
@@ -49,11 +53,13 @@ private data class PathBrowseSpec(
 @Composable
 fun <T : Any> ConfigEditor(
     value: T,
-    onChange: (T) -> Unit
+    onChange: (T) -> Unit,
+    descriptorBasePath: String? = null,
 ) = ConfigEditor(
     clazz = value::class as KClass<T>,
     value = value,
-    onChange = onChange
+    onChange = onChange,
+    descriptorBasePath = descriptorBasePath,
 )
 
 @Suppress("UNCHECKED_CAST")
@@ -61,7 +67,8 @@ fun <T : Any> ConfigEditor(
 fun <T : Any> ConfigEditor(
     clazz: KClass<T>,
     value: T,
-    onChange: (T) -> Unit
+    onChange: (T) -> Unit,
+    descriptorBasePath: String? = null,
 ) {
     val copyFunc = clazz.memberFunctions.find { member -> member.name == "copy" }
     checkNotNull(copyFunc) { "$clazz is not a data class" }
@@ -72,8 +79,8 @@ fun <T : Any> ConfigEditor(
         .sortedBy { copyFunParameterOrder[it.name] ?: Int.MAX_VALUE }
 
     properties.forEachIndexed { index, property ->
-        val propValue = property.get(value)!!
-        val newParameterFunc = { newValue: Any ->
+        val propValue = property.get(value)
+        val newParameterFunc = { newValue: Any? ->
             val newParameters = copyFunc.callBy(
                 mapOf(
                     copyFunc.parameters[0] to value,
@@ -86,31 +93,56 @@ fun <T : Any> ConfigEditor(
             index,
             property,
             propValue,
-            newParameterFunc
+            newParameterFunc,
+            descriptorBasePath
         )
     }
 }
+
+private data class LocalizedFieldInfo(
+    val fieldPath: String?,
+    val label: String,
+    val description: String?,
+    val section: String?,
+)
+
+private fun KProperty<*>.localizedInfo(valueClass: KClass<*>?, descriptorBasePath: String?): LocalizedFieldInfo {
+    val fieldPath = descriptorBasePath?.let { I18nDescriptorRegistry.configFieldPath(it, name) }
+    val labelFallback = findAnnotation<SettingName>()?.enText
+        ?: valueClass?.findAnnotation<SettingName>()?.enText
+        ?: camelCaseToWords(name)
+    val descriptionFallback = findAnnotation<SettingDesc>()?.enText
+        ?: valueClass?.findAnnotation<SettingDesc>()?.enText
+    val sectionFallback = findAnnotation<SettingSection>()?.enText
+        ?: valueClass?.findAnnotation<SettingSection>()?.enText
+    return LocalizedFieldInfo(
+        fieldPath = fieldPath,
+        label = localize(fieldPath?.let { "$it.name" }, labelFallback),
+        description = descriptionFallback?.let { localize(fieldPath?.let { path -> "$path.desc" }, it) },
+        section = sectionFallback?.let { localize(fieldPath?.let { path -> "$path.section" }, it) },
+    )
+}
+
+private fun localize(key: String?, fallback: String): String =
+    key?.let { I18n.text(it, fallback) } ?: fallback
 
 @Suppress("UNCHECKED_CAST")
 @Composable
 private fun ConfigField(
     index: Int,
     prop: KProperty<*>,
-    propValue: Any,
-    onChange: (Any) -> Unit
+    propValue: Any?,
+    onChange: (Any?) -> Unit,
+    descriptorBasePath: String?,
 ) {
-    val section = prop.findAnnotation<SettingSection>()?.enText
-        ?: propValue::class.findAnnotation<SettingSection>()?.enText
+    val propValueClass = propValue?.let { it::class }
+    val fieldInfo = prop.localizedInfo(propValueClass, descriptorBasePath)
+    val label = fieldInfo.label
+    val description = fieldInfo.description
 
-    val label = prop.findAnnotation<SettingName>()?.enText
-        ?: propValue::class.findAnnotation<SettingName>()?.enText
-        ?: camelCaseToWords(prop.name)
-    val description = prop.findAnnotation<SettingDesc>()?.enText
-        ?: propValue::class.findAnnotation<SettingDesc>()?.enText
-
-    if (section != null) {
+    if (fieldInfo.section != null) {
         Text(
-            section,
+            fieldInfo.section,
             style = FluentTheme.typography.bodyStrong,
             modifier = Modifier.padding(start = 2.dp, top = if (index == 0) 2.dp else 32.dp, bottom = 8.dp)
         )
@@ -119,7 +151,13 @@ private fun ConfigField(
     val pathBrowseSpec = prop.pathBrowseSpec()
     when (propValue) {
         is String -> InspectorCard(label = label, description = description) {
-            if (pathBrowseSpec != null) {
+            if (prop.isNullableString()) {
+                NullableStringField(
+                    value = propValue,
+                    onValueChange = onChange,
+                    browseSpec = pathBrowseSpec
+                )
+            } else if (pathBrowseSpec != null) {
                 PathField(
                     value = propValue,
                     onValueChange = onChange,
@@ -130,6 +168,17 @@ private fun ConfigField(
                     value = propValue,
                     onValueChange = onChange
                 )
+            }
+        }
+        null -> InspectorCard(label = label, description = description) {
+            if (prop.isNullableString()) {
+                NullableStringField(
+                    value = null,
+                    onValueChange = onChange,
+                    browseSpec = pathBrowseSpec
+                )
+            } else {
+                ReadOnlyValue("null")
             }
         }
         is Int -> {
@@ -188,7 +237,8 @@ private fun ConfigField(
                 label = label,
                 description = description,
                 value = propValue as List<Any>,
-                onValueChange = onChange
+                onValueChange = onChange,
+                descriptorFieldPath = fieldInfo.fieldPath,
             )
         else -> {
             val propType = propValue::class
@@ -198,7 +248,8 @@ private fun ConfigField(
                         label = label,
                         description = description,
                         value = propValue,
-                        onChange = onChange
+                        onChange = onChange,
+                        descriptorBasePath = propType.descriptorConfigBase(fieldInfo.fieldPath),
                     )
                 }
                 else -> InspectorCard(label, description) {
@@ -244,16 +295,22 @@ private fun InspectorCard(
     )
 }
 
+private fun KProperty<*>.isNullableString(): Boolean =
+    returnType.isMarkedNullable && returnType.classifier == String::class
+
 @Composable
-private fun BooleanField(value: Boolean, onChange: (Any) -> Unit) {
+private fun BooleanField(value: Boolean, onChange: (Any?) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(if (value) "On" else "Off", color = FluentTheme.colors.text.text.secondary)
+        Text(
+            if (value) uiText(UiText.ConfigEditor.On) else uiText(UiText.ConfigEditor.Off),
+            color = FluentTheme.colors.text.text.secondary
+        )
         Switcher(checked = value, onCheckStateChange = { it: Boolean -> onChange(it) }, text = null)
     }
 }
 
 @Composable
-private fun StringField(value: String, onValueChange: (Any) -> Unit) {
+private fun StringField(value: String, onValueChange: (Any?) -> Unit) {
     TextField(
         value = value,
         onValueChange = { onValueChange(it) },
@@ -263,7 +320,62 @@ private fun StringField(value: String, onValueChange: (Any) -> Unit) {
 }
 
 @Composable
-private fun IntField(value: Int, onValueChange: (Any) -> Unit) {
+private fun NullableStringField(
+    value: String?,
+    onValueChange: (Any?) -> Unit,
+    browseSpec: PathBrowseSpec?,
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val textValue = value.orEmpty()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        TextField(
+            value = textValue,
+            onValueChange = { onValueChange(it) },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+        if (browseSpec != null) {
+            Button(
+                onClick = {
+                    coroutineScope.launch {
+                        browseSpec.browse(textValue)?.let { onValueChange(it) }
+                    }
+                },
+                modifier = Modifier.width(if (browseSpec.browseDirectory == null) 96.dp else 72.dp)
+            ) {
+                Text(browseSpec.browseLabel)
+            }
+            if (browseSpec.browseDirectory != null && browseSpec.browseDirectoryLabel != null) {
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            browseSpec.browseDirectory.invoke(textValue)?.let { onValueChange(it) }
+                        }
+                    },
+                    modifier = Modifier.width(72.dp)
+                ) {
+                    Text(browseSpec.browseDirectoryLabel)
+                }
+            }
+        }
+        Button(
+            onClick = { onValueChange(null) },
+            iconOnly = true
+        ) {
+            Icon(
+                imageVector = Icons.Default.Dismiss,
+                contentDescription = uiText(UiText.ConfigEditor.ClearValue)
+            )
+        }
+    }
+}
+
+@Composable
+private fun IntField(value: Int, onValueChange: (Any?) -> Unit) {
     TextField(
         value = value.toString(),
         onValueChange = { it.toIntOrNull()?.let { onValueChange(it) } },
@@ -273,7 +385,7 @@ private fun IntField(value: Int, onValueChange: (Any) -> Unit) {
 }
 
 @Composable
-private fun DecimalField(value: Decimal, onValueChange: (Any) -> Unit) {
+private fun DecimalField(value: Decimal, onValueChange: (Any?) -> Unit) {
     TextField(
         value = value.toString(),
         onValueChange = { it.toBigDecimalOrNull()?.let { onValueChange(it) } },
@@ -283,10 +395,10 @@ private fun DecimalField(value: Decimal, onValueChange: (Any) -> Unit) {
 }
 
 @Composable
-private fun EnumField(value: Enum<*>, onValueChange: (Any) -> Unit) {
+private fun EnumField(value: Enum<*>, onValueChange: (Any?) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     fun enumName(enumConst: Enum<*>): String =
-        enumConst.name
+        (enumConst as? DisplayEnum)?.displayString ?: enumConst.name
     DropDownButton(
         onClick = { expanded = true },
     ) {
@@ -316,7 +428,7 @@ private fun IntSliderField(
     description: String?,
     value: Int,
     range: IntRangeVal,
-    onValueChange: (Any) -> Unit,
+    onValueChange: (Any?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var typedValue by remember(value) { mutableStateOf(value.toString()) }
@@ -415,7 +527,7 @@ private fun DecimalSliderField(
     description: String?,
     value: Decimal,
     range: DecimalRangeVal,
-    onValueChange: (Any) -> Unit,
+    onValueChange: (Any?) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var typedValue by remember(value) { mutableStateOf(value.toString()) }
@@ -500,7 +612,13 @@ private fun DecimalSliderField(
 }
 
 @Composable
-private fun NestedConfigField(label: String, description: String?, value: Any, onChange: (Any) -> Unit) {
+private fun NestedConfigField(
+    label: String,
+    description: String?,
+    value: Any,
+    onChange: (Any?) -> Unit,
+    descriptorBasePath: String?,
+) {
     CardExpanderItem(
         heading = {
             var expanded by remember { mutableStateOf(false) }
@@ -528,12 +646,57 @@ private fun NestedConfigField(label: String, description: String?, value: Any, o
                 modifier = Modifier
                     .padding(end = 16.dp)
             ) {
-                ConfigEditor(value = value, onChange = onChange)
+                ConfigEditor(
+                    value = value,
+                    onChange = onChange,
+                    descriptorBasePath = descriptorBasePath,
+                )
             }
         },
         icon = null
     )
 }
+
+@Suppress("UNCHECKED_CAST")
+private fun <E : Any> KProperty<*>.newListEntryValue(): E? {
+    val elementClass = returnType.arguments.firstOrNull()?.type?.classifier as? KClass<*> ?: return null
+    val value = when (elementClass) {
+        String::class -> ""
+        Int::class -> 0
+        Decimal::class -> Decimal.ZERO
+        Boolean::class -> false
+        else -> elementClass.defaultDataClassValue()
+    } ?: return null
+    return value as? E
+}
+
+private fun KClass<*>.defaultDataClassValue(): Any? {
+    if (!isData) return null
+    val constructor = primaryConstructor ?: return null
+    if (constructor.parameters.any { !it.isOptional }) return null
+    return runCatching { constructor.callBy(emptyMap()) }.getOrNull()
+}
+
+private data class ConfigDisplayInfo(
+    val label: String,
+    val description: String?,
+)
+
+private fun KClass<*>.configDisplayInfo(fallback: String, descriptorBasePath: String?): ConfigDisplayInfo {
+    val labelFallback = findAnnotation<SettingName>()?.enText
+        ?: simpleName?.let(::camelCaseToWords)
+        ?: fallback
+    val descriptionFallback = findAnnotation<SettingDesc>()?.enText
+    return ConfigDisplayInfo(
+        label = localize(descriptorBasePath?.let { "$it.name" }, labelFallback),
+        description = descriptionFallback?.let { localize(descriptorBasePath?.let { path -> "$path.desc" }, it) },
+    )
+}
+
+private fun KClass<*>.descriptorConfigBase(defaultBasePath: String?): String? =
+    I18nDescriptorRegistry.classOverrideConfigBase(this)?.let { overrideBasePath ->
+        if (defaultBasePath?.startsWith("ui.") == true) uiDescriptorPath(overrideBasePath) else overrideBasePath
+    } ?: defaultBasePath
 
 @Suppress("UNCHECKED_CAST")
 @Composable
@@ -542,13 +705,17 @@ private fun <E : Any> ListField(
     label: String,
     description: String?,
     value: List<E>,
-    onValueChange: (List<E>) -> Unit
+    onValueChange: (List<E>) -> Unit,
+    descriptorFieldPath: String?,
 ) {
     val listUpdater = ListUpdater({ value }, onValueChange)
     val pathBrowseSpec = prop.pathBrowseSpec()
 
     @Composable
-    fun ListEntryCard(index: Int, content: @Composable () -> Unit) {
+    fun ListEntryCard(
+        index: Int,
+        content: @Composable () -> Unit
+    ) {
         CardExpanderItem(
             icon = null,
             heading = {
@@ -573,7 +740,7 @@ private fun <E : Any> ListField(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Copy,
-                            contentDescription = "Duplicate Entry"
+                            contentDescription = uiText(UiText.ConfigEditor.DuplicateEntry)
                         )
                     }
                     Button(
@@ -584,7 +751,7 @@ private fun <E : Any> ListField(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Delete,
-                            contentDescription = "Delete Entry"
+                            contentDescription = uiText(UiText.ConfigEditor.DeleteEntry)
                         )
                     }
                 }
@@ -592,21 +759,77 @@ private fun <E : Any> ListField(
         )
     }
 
+    @Composable
+    fun DataClassListEntryCard(
+        index: Int,
+        displayInfo: ConfigDisplayInfo,
+        content: @Composable () -> Unit
+    ) {
+        var itemExpanded by remember { mutableStateOf(false) }
+        Expander(
+            expanded = itemExpanded,
+            onExpandedChanged = { itemExpanded = it },
+            icon = null,
+            heading = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(0.7f)
+                ) {
+                    Text(
+                        displayInfo.label,
+                        style = FluentTheme.typography.bodyStrong,
+                    )
+                    if (displayInfo.description != null) {
+                        Text(
+                            displayInfo.description,
+                            color = FluentTheme.colors.text.text.secondary,
+                            style = FluentTheme.typography.caption
+                        )
+                    }
+                }
+            },
+            trailing = {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { listUpdater.add(index, value[index]) },
+                        iconOnly = true
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Copy,
+                            contentDescription = uiText(UiText.ConfigEditor.DuplicateEntry)
+                        )
+                    }
+                    Button(
+                        onClick = { listUpdater.removeAt(index) },
+                        iconOnly = true
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = uiText(UiText.ConfigEditor.DeleteEntry)
+                        )
+                    }
+                }
+            }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+            ) {
+                content()
+            }
+        }
+    }
+
     var expanded by remember { mutableStateOf(false) }
-    val newEntry: (() -> Unit)? = when (prop.returnType.arguments.first().type?.classifier) {
-        String::class -> {
-            { listUpdater.add("" as E) }
+    val newEntryValue = prop.newListEntryValue<E>()
+    val newEntry: (() -> Unit)? = newEntryValue?.let { entry ->
+        {
+            expanded = true
+            listUpdater.add(entry)
         }
-        Int::class -> {
-            { listUpdater.add(0 as E) }
-        }
-        Decimal::class -> {
-            { listUpdater.add(Decimal.ZERO as E) }
-        }
-        Boolean::class -> {
-            { listUpdater.add(false as E) }
-        }
-        else -> null
     }
 
     Expander(
@@ -642,7 +865,7 @@ private fun <E : Any> ListField(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
-                            contentDescription = "Add entry"
+                            contentDescription = uiText(UiText.ConfigEditor.AddEntry)
                         )
                     }
                 }
@@ -654,7 +877,7 @@ private fun <E : Any> ListField(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Dismiss,
-                        contentDescription = "Clear list"
+                        contentDescription = uiText(UiText.ConfigEditor.ClearList)
                     )
                 }
             }
@@ -662,7 +885,7 @@ private fun <E : Any> ListField(
     ) {
         if (listUpdater.isEmpty()) {
             Text(
-                "Empty List",
+                uiText(UiText.ConfigEditor.EmptyList),
                 modifier = Modifier.padding(12.dp)
                     .fillMaxWidth(),
                 textAlign = TextAlign.Center,
@@ -671,8 +894,10 @@ private fun <E : Any> ListField(
             return@Expander
         }
         listUpdater.forEachIndexed { index, item ->
-            val onChange = { newItem: Any ->
-                listUpdater[index] = newItem as E
+            val onChange = { newItem: Any? ->
+                if (newItem != null) {
+                    listUpdater[index] = newItem as E
+                }
             }
             when (item) {
                 is String -> ListEntryCard(index) {
@@ -743,12 +968,17 @@ private fun <E : Any> ListField(
                     val propType = item::class
                     when {
                         propType.isData -> {
-                            NestedConfigField(
-                                label = label,
-                                description = description,
-                                value = item,
-                                onChange = onChange
-                            )
+                            val itemDescriptorBase = descriptorFieldPath?.let { "$it.item" }
+                            DataClassListEntryCard(
+                                index = index,
+                                displayInfo = propType.configDisplayInfo("#$index", itemDescriptorBase)
+                            ) {
+                                ConfigEditor(
+                                    value = item,
+                                    onChange = onChange,
+                                    descriptorBasePath = propType.descriptorConfigBase(itemDescriptorBase),
+                                )
+                            }
                         }
                         else -> InspectorCard(label, description) {
                             ReadOnlyValue(item.toString())
@@ -762,19 +992,19 @@ private fun <E : Any> ListField(
 
 private fun KProperty<*>.pathBrowseSpec(): PathBrowseSpec? = when (name) {
     "input" -> PathBrowseSpec(
-        browseLabel = "File",
+        browseLabel = uiText(UiText.ConfigEditor.File),
         browse = { chooseInputPath(it)?.toString() },
-        browseDirectoryLabel = "Dir",
+        browseDirectoryLabel = uiText(UiText.ConfigEditor.Directory),
         browseDirectory = { chooseInputDirectory(it)?.toString() }
     )
     "output" -> PathBrowseSpec(
-        browseLabel = "Browse",
+        browseLabel = uiText(UiText.ConfigEditor.Browse),
         browse = { chooseOutputPath(it)?.toString() }
     )
     "libs" -> PathBrowseSpec(
-        browseLabel = "File",
+        browseLabel = uiText(UiText.ConfigEditor.File),
         browse = { chooseInputPath(it)?.toString() },
-        browseDirectoryLabel = "Dir",
+        browseDirectoryLabel = uiText(UiText.ConfigEditor.Directory),
         browseDirectory = { chooseInputDirectory(it)?.toString() }
     )
     else -> null
@@ -820,7 +1050,7 @@ private fun ReadOnlyValue(text: String) {
 @Composable
 private fun PathField(
     value: String,
-    onValueChange: (Any) -> Unit,
+    onValueChange: (Any?) -> Unit,
     browseSpec: PathBrowseSpec,
 ) {
     val coroutineScope = rememberCoroutineScope()

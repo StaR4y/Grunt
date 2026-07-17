@@ -1,11 +1,8 @@
 package net.spartanb312.grunteon.obfuscator
 
-import net.spartanb312.grunteon.obfuscator.pipeline.CreditsCalc
-import net.spartanb312.grunteon.obfuscator.pipeline.CreditsSummary
+import net.spartanb312.grunteon.obfuscator.pipeline.*
 import net.spartanb312.grunteon.obfuscator.process.*
 import net.spartanb312.grunteon.obfuscator.process.nativecode.NativePipelineConfig
-import net.spartanb312.grunteon.obfuscator.process.nativecode.NativePipelineRunner
-import net.spartanb312.grunteon.obfuscator.process.resource.JarDumper
 import net.spartanb312.grunteon.obfuscator.process.resource.ObfuscationIO
 import net.spartanb312.grunteon.obfuscator.process.resource.WorkResources
 import net.spartanb312.grunteon.obfuscator.process.transformers.rename.mapping.MappingApplier
@@ -14,9 +11,6 @@ import net.spartanb312.grunteon.obfuscator.process.transformers.rename.mapping.N
 import net.spartanb312.grunteon.obfuscator.util.Logger
 import net.spartanb312.grunteon.obfuscator.util.filters.ClassPredicate
 import net.spartanb312.grunteon.obfuscator.util.filters.buildClassNamePredicates
-import net.spartanb312.grunteon.obfuscator.util.numerical.formatInteger
-import java.util.*
-import kotlin.math.roundToLong
 
 // Grunteon process instance
 class Grunteon(
@@ -31,47 +25,15 @@ class Grunteon(
      */
     val nameMapping = NameMapping()
     var creditsSummary: CreditsSummary = CreditsSummary.EMPTY
-        private set
 
-    fun init() {
-    }
-
-    fun execute() {
-        // TODO: Profiler
-        context(workRes) {
-            Logger.info("Obfuscating...")
-            val pipelineBuilder = PipelineBuilder()
-            transformers.forEach { (transformer, config) ->
-                transformer.buildStageImpl(pipelineBuilder, config)
-            }
-            val workerContext = WorkerContext()
-            workerContext.execute(this, pipelineBuilder)
-            creditsSummary = CreditsCalc.summarize(transformers.map { it.first })
-            val totalCredits = creditsSummary.totalCredits
-            Logger.info("Credits used: ${formatInteger(totalCredits.roundToLong())}")
-            creditsSummary.transformers.forEach {
-                val rate = it.credits / totalCredits * 100
-                Logger.info(
-                    "    ${it.name}[${String.format(Locale.US, "%.2f", rate)}%]:" +
-                        " credits=${formatInteger(it.credits.roundToLong())}, " +
-                        "raw=${formatInteger(it.raw)}, multiplier=${it.baseMultiplier}"
-                )
-            }
-        }
-
-        val nativeConfig = nativePipelineConfig
-        context(this) {
-            NativePipelineRunner.run(nativeConfig)
-        }
-
-        // TODO: make this optional
-        val output = io.output
-        if (output != null) {
-            JarDumper.dumpJar(output)
-        }
-        if (globalConfig.dumpMappings) {
-            io.mappingsOutput?.let { nameMapping.dump(it) }
-        }
+    fun run() {
+        // TODO: Stage pipeline
+        // JVM obfuscate stage
+        JvmObfuscation().execute(this)
+        // Native obfuscate stage
+        NativeObfuscation().execute(this)
+        // Output stage
+        FinalOutput().execute(this)
     }
 
     val mixinInclusion = ClassPredicate.IncludeExclude(

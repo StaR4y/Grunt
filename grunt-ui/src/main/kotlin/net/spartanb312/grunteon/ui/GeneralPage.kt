@@ -11,14 +11,35 @@ fun GeneralPage(
 ) {
     var globalConfig by DataClassUpdater(appModel::obfConfig, ObfConfig::globalConfig)
     PanelSurface(
-        title = "General Configuration",
-        description = "Top-level obfuscation config options.",
+        title = uiText(UiText.Page.GeneralTitle),
+        description = uiText(UiText.Page.GeneralDescription),
         modifier = Modifier.fillMaxSize()
     ) {
         ScrollPanel {
             ConfigEditor(
                 value = globalConfig,
                 onChange = { globalConfig = it },
+                descriptorBasePath = UiDescriptorPaths.GlobalConfig,
+            )
+        }
+    }
+}
+
+@Composable
+fun NativePage(
+    appModel: AppModel
+) {
+    var nativePipelineConfig by DataClassUpdater(appModel::obfConfig, ObfConfig::nativePipeline)
+    PanelSurface(
+        title = uiText(UiText.Page.NativeTitle),
+        description = uiText(UiText.Page.NativeDescription),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        ScrollPanel {
+            ConfigEditor(
+                value = nativePipelineConfig,
+                onChange = { nativePipelineConfig = it },
+                descriptorBasePath = UiDescriptorPaths.NativePipelineConfig,
             )
         }
     }

@@ -43,16 +43,61 @@ object NativePipelineRunner {
             return
         }
 
-        val libraryPath = compileResult.libraryPath
+        val libraries = compileResult.libraries.takeIf { it.isNotEmpty() }
+            ?: compileResult.libraryPath?.let {
+                listOf(NativeCompiledLibrary(sourceBundle.plan.platform, sourceBundle.plan.resourceName, it))
+            }
             ?: throw NativeCompileException("Native compiler reported success without a library path")
-        val libraryBytes = Files.readAllBytes(libraryPath)
-        instance.workRes.addGeneratedResource(sourceBundle.plan.resourceName, libraryBytes)
+        val libraryBytes = libraries.map { library ->
+            library to Files.readAllBytes(library.libraryPath)
+        }
+        libraryBytes.forEach { (library, bytes) ->
+            instance.workRes.addGeneratedResource(library.resourceName, bytes)
+        }
         NativeCommitter.commit(sourceBundle, config)
 
         Logger.info(" - NativePipeline:")
         Logger.info("    Nativeized ${accepted.size} methods in ${sourceBundle.plan.classes.size} classes")
         Logger.info("    Wrote ${sourceBundle.sourceFiles.size} native source file(s) under ${sourceBundle.sourcePath.parent}")
-        Logger.info("    Injected native library resource ${sourceBundle.plan.resourceName}")
+        Logger.info("    Native compiler elapsed ${compileResult.compileTimeMillis} ms")
+        Logger.info("    Native libraries: ${libraryBytes.size}")
+        libraryBytes.forEach { (library, bytes) ->
+            Logger.info("      ${library.resourceName}: ${bytes.size} bytes")
+        }
+        Logger.info(
+            "    Reference slots: " +
+                "classes=${sourceBundle.plan.referenceSlots.classSlotCount}, " +
+                "methods=${sourceBundle.plan.referenceSlots.methodSlotCount}, " +
+                "fields=${sourceBundle.plan.referenceSlots.fieldSlotCount}, " +
+                "strings=${sourceBundle.plan.referenceSlots.stringSlotCount}"
+        )
+        Logger.info(
+            "    Primitive intrinsic optimizations: " +
+                "calls=${sourceBundle.intrinsicStats.total}, " +
+                "kinds=${sourceBundle.intrinsicStats.unique}/${NativeJvmIntrinsicRegistry.keys.size}"
+        )
+        if (sourceBundle.intrinsicStats.total > 0) {
+            sourceBundle.intrinsicStats.byKey
+                .toList()
+                .sortedWith(compareBy({ it.first.owner }, { it.first.name }, { it.first.desc }))
+                .forEach { (key, count) ->
+                    Logger.info("      ${key.owner}.${key.name}${key.desc}: $count")
+                }
+        }
+        Logger.info(
+            "    SSA direct intrinsic optimizations: " +
+                "calls=${sourceBundle.ssaIntrinsicStats.total}, " +
+                "kinds=${sourceBundle.ssaIntrinsicStats.unique}/${NativeSsaIntrinsicLowerer.supportedKeys.size}"
+        )
+        if (sourceBundle.ssaIntrinsicStats.total > 0) {
+            sourceBundle.ssaIntrinsicStats.byKey
+                .toList()
+                .sortedWith(compareBy({ it.first.owner }, { it.first.name }, { it.first.desc }))
+                .forEach { (key, count) ->
+                    Logger.info("      ${key.owner}.${key.name}${key.desc}: $count")
+                }
+        }
+        Logger.info("    Injected native library resources: ${libraries.joinToString { it.resourceName }}")
     }
 
     private fun logValidation(
